@@ -10,7 +10,7 @@ from requests_toolbelt import MultipartEncoder
 
 CF_ACCOUNT = "b99cc553f1a9f631ae76b9c5dd698fbd"
 WORKER_NAME = "nexus-hypercore-001"
-KV_NAMESPACE_ID = "33be0158fc284aa78eae0511826aacca"
+KV_NAMESPACE_ID = "0c52f1dc017542c198ff5e188f75851a"  # kv_quantum_hypervisor_state
 
 # Token from env (fallback to wrangler cache)
 TOKEN = os.environ.get("CF_API_TOKEN") or os.environ.get("CLOUDFLARE_API_TOKEN")

@@ -10,7 +10,7 @@ crons = ["*/5 * * * *"]
 WORKER_ID = "nexus-hypercore-001"
 DOMAIN = "kuparchad.workers.dev"
 
-# kv_nexus_state (shared mesh state namespace, id=33be0158fc284aa78eae0511826aacca)
+# kv_quantum_hypervisor_state — dedicated hypercore namespace, not shared with workers
 [[kv_namespaces]]
 binding = "KV"
-id = "33be0158fc284aa78eae0511826aacca"
+id = "0c52f1dc017542c198ff5e188f75851a"
