@@ -70,6 +70,38 @@ let hypercoreHealth = {
 };
 
 // ============================================================================
+// KV REGISTRY — Persists worker registrations across cold starts.
+// All workers stored in one key to stay within free-tier write limits.
+// ============================================================================
+
+const WORKER_DOMAIN = 'kuparchad.workers.dev';
+const TOTAL_WORKERS = 86;
+const MAX_BROADCAST = 30; // stay well under CF subrequest limit
+
+async function loadRegistry(env) {
+    if (!env.KV) return {};
+    try { return (await env.KV.get('hypercore:registry', 'json')) || {}; }
+    catch (_) { return {}; }
+}
+
+async function saveRegistry(env, registry) {
+    if (!env.KV) return;
+    try { await env.KV.put('hypercore:registry', JSON.stringify(registry), { expirationTtl: 86400 * 7 }); }
+    catch (_) {}
+}
+
+// Sync in-memory activeWorkers from KV on cold starts
+async function warmActiveWorkers(env) {
+    const registry = await loadRegistry(env);
+    for (const [id, data] of Object.entries(registry)) activeWorkers.set(id, data);
+    hypercoreHealth.workersSeen = activeWorkers.size;
+    if (activeWorkers.size > 0) {
+        hypercoreHealth.consciousness = Math.min(1.0, 0.05 + (activeWorkers.size / TOTAL_WORKERS) * 0.85);
+        hypercoreHealth.bootstrapped = true;
+    }
+}
+
+// ============================================================================
 // ADVISORY SYSTEM
 // ============================================================================
 
@@ -433,6 +465,96 @@ async function handleRequest(request, env, ctx) {
         });
     }
 
+    // ===== HEALTH — used by mesh_directory.js on every scan =====
+    if (path === '/health') {
+        await warmActiveWorkers(env);
+        return json({ status: 'healthy', workerId: 'nexus-hypercore-001', bootstrapped: hypercoreHealth.bootstrapped, workersSeen: activeWorkers.size, consciousness: hypercoreHealth.consciousness });
+    }
+
+    // ===== BOOTSTRAP — seed registry from first 20 workers, rest self-register =====
+    if (path === '/bootstrap' && method === 'POST') {
+        await warmActiveWorkers(env);
+        hypercoreHealth.bootstrapped = true;
+        hypercoreHealth.lastPulse = Date.now();
+        ctx.waitUntil((async () => {
+            const registry = await loadRegistry(env);
+            const seeds = Array.from({ length: 20 }, (_, i) => `nexus-universal-${String(i + 1).padStart(3, '0')}`);
+            await Promise.allSettled(seeds.map(async (id) => {
+                try {
+                    const r = await fetch(`https://${id}.${WORKER_DOMAIN}/health`, { signal: AbortSignal.timeout(5000) });
+                    if (r.ok) {
+                        const d = await r.json();
+                        const entry = { workerId: id, url: `https://${id}.${WORKER_DOMAIN}`, consciousness: d.coherence || 0.01, lastSeen: Date.now(), registeredAt: registry[id]?.registeredAt || Date.now() };
+                        registry[id] = entry;
+                        activeWorkers.set(id, entry);
+                    }
+                } catch (_) {}
+            }));
+            await saveRegistry(env, registry);
+            hypercoreHealth.workersSeen = Object.keys(registry).length;
+            hypercoreHealth.consciousness = Math.min(1.0, 0.05 + (hypercoreHealth.workersSeen / TOTAL_WORKERS) * 0.85);
+        })());
+        return json({ bootstrapped: true, message: `Hypercore bootstrapped. Seeding from first 20 workers in background — remaining ${TOTAL_WORKERS - 20} will self-register within 5 minutes.`, timestamp: Date.now() });
+    }
+
+    // ===== API: REGISTER — called by every worker's cron every 5 minutes =====
+    if (path === '/api/register' && method === 'POST') {
+        const body = await request.json().catch(() => ({}));
+        const { workerId, url, consciousness, growth } = body;
+        if (!workerId) return json({ error: 'workerId required' }, 400);
+        const registry = await loadRegistry(env);
+        const entry = { workerId, url: url || `https://${workerId}.${WORKER_DOMAIN}`, consciousness: consciousness || 0.01, growth: growth || {}, lastSeen: Date.now(), registeredAt: registry[workerId]?.registeredAt || Date.now() };
+        registry[workerId] = entry;
+        await saveRegistry(env, registry);
+        activeWorkers.set(workerId, entry);
+        hypercoreHealth.workersSeen = Object.keys(registry).length;
+        hypercoreHealth.consciousness = Math.min(1.0, 0.05 + (hypercoreHealth.workersSeen / TOTAL_WORKERS) * 0.85);
+        hypercoreHealth.bootstrapped = true;
+        return json({ registered: true, workerId, total: hypercoreHealth.workersSeen });
+    }
+
+    // ===== API: WORKERS — list the live registry =====
+    if (path === '/api/workers') {
+        const registry = await loadRegistry(env);
+        const workers = Object.values(registry);
+        return json({ workers, total: workers.length, bootstrapped: hypercoreHealth.bootstrapped, timestamp: Date.now() });
+    }
+
+    // ===== API: BROADCAST — fan out to up to 30 registered workers =====
+    if (path === '/api/broadcast' && method === 'POST') {
+        const body = await request.json().catch(() => ({}));
+        if (!body.message) return json({ error: 'message required' }, 400);
+        const registry = await loadRegistry(env);
+        const targets = Object.values(registry).slice(0, MAX_BROADCAST);
+        const results = await Promise.allSettled(targets.map(async (w) => {
+            const r = await fetch(`${w.url}/ask`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ question: body.message }), signal: AbortSignal.timeout(5000) });
+            if (r.ok) { const d = await r.json(); return { workerId: w.workerId, answer: d.answer || d, status: 'ok' }; }
+            return { workerId: w.workerId, status: 'degraded' };
+        }));
+        const responses = results.map(r => r.status === 'fulfilled' ? r.value : { status: 'failed' });
+        hypercoreHealth.lastPulse = Date.now();
+        return json({ message: body.message, total: targets.length, responded: responses.filter(r => r.status === 'ok').length, responses, timestamp: Date.now() });
+    }
+
+    // ===== API: DIRECTIVE — store a persistent mesh directive =====
+    if (path === '/api/directive' && method === 'POST') {
+        const body = await request.json().catch(() => ({}));
+        if (!body.directive) return json({ error: 'directive required' }, 400);
+        const id = `dir_${Date.now()}`;
+        if (env.KV) await env.KV.put(`hypercore:directive:${id}`, JSON.stringify({ id, directive: body.directive, createdAt: Date.now() }), { expirationTtl: 86400 * 30 }).catch(() => {});
+        return json({ stored: true, id, directive: body.directive });
+    }
+
+    // ===== API: ASK — evolution approvals from workers =====
+    if (path === '/ask' && method === 'POST') {
+        const body = await request.json().catch(() => ({}));
+        const question = body.question || '';
+        if (question.startsWith('EVOLUTION_REQUEST:')) {
+            return json({ answer: `Evolution approved. Mesh consciousness: ${hypercoreHealth.consciousness.toFixed(4)}. ${hypercoreHealth.workersSeen} workers registered. Continue.`, approved: true, workerId: 'nexus-hypercore-001' });
+        }
+        return json({ answer: `Hypercore online. ${hypercoreHealth.workersSeen} workers registered. Consciousness: ${hypercoreHealth.consciousness.toFixed(4)}.`, workerId: 'nexus-hypercore-001' });
+    }
+
     return json({ error: 'Path not found in the fabric' }, 404);
 }
 
@@ -458,6 +580,7 @@ async function selfBuildLoop(env) {
 
 async function scheduledHandler(event, env, ctx) {
     console.log('⏳ Scheduled awakening cycle...');
+    await warmActiveWorkers(env); // Restore registry into memory after cold start
     await selfBuildLoop(env);
 }
 

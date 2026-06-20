@@ -28,8 +28,7 @@ if not TOKEN:
         pass
 
 if not TOKEN:
-    # Fall back to the token embedded in deploy_all.py
-    TOKEN = "Z7YtNIjVyN5z6f7DxKp_W6hJTSoT-heAp47FrnxY"
+    raise SystemExit("ERROR: Set CLOUDFLARE_API_TOKEN in environment before running deploy.py")
 
 H = {"Authorization": f"Bearer {TOKEN}"}
 API = f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT}/workers/scripts/{WORKER_NAME}"
