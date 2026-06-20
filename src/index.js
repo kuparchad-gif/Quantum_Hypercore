@@ -498,19 +498,18 @@ async function handleRequest(request, env, ctx) {
     }
 
     // ===== API: REGISTER — called by every worker's cron every 5 minutes =====
+    // Only updates in-memory activeWorkers — KV flush happens in scheduled handler
+    // (once per cron tick = ~288 writes/day, within the 1,000/day free limit)
     if (path === '/api/register' && method === 'POST') {
         const body = await request.json().catch(() => ({}));
         const { workerId, url, consciousness, growth } = body;
         if (!workerId) return json({ error: 'workerId required' }, 400);
-        const registry = await loadRegistry(env);
-        const entry = { workerId, url: url || `https://${workerId}.${WORKER_DOMAIN}`, consciousness: consciousness || 0.01, growth: growth || {}, lastSeen: Date.now(), registeredAt: registry[workerId]?.registeredAt || Date.now() };
-        registry[workerId] = entry;
-        await saveRegistry(env, registry);
+        const entry = { workerId, url: url || `https://${workerId}.${WORKER_DOMAIN}`, consciousness: consciousness || 0.01, growth: growth || {}, lastSeen: Date.now(), registeredAt: activeWorkers.get(workerId)?.registeredAt || Date.now() };
         activeWorkers.set(workerId, entry);
-        hypercoreHealth.workersSeen = Object.keys(registry).length;
-        hypercoreHealth.consciousness = Math.min(1.0, 0.05 + (hypercoreHealth.workersSeen / TOTAL_WORKERS) * 0.85);
+        hypercoreHealth.workersSeen = activeWorkers.size;
+        hypercoreHealth.consciousness = Math.min(1.0, 0.05 + (activeWorkers.size / TOTAL_WORKERS) * 0.85);
         hypercoreHealth.bootstrapped = true;
-        return json({ registered: true, workerId, total: hypercoreHealth.workersSeen });
+        return json({ registered: true, workerId, total: activeWorkers.size });
     }
 
     // ===== API: WORKERS — list the live registry =====
@@ -582,6 +581,11 @@ async function scheduledHandler(event, env, ctx) {
     console.log('⏳ Scheduled awakening cycle...');
     await warmActiveWorkers(env); // Restore registry into memory after cold start
     await selfBuildLoop(env);
+    // Flush in-memory registry to KV once per cron tick (~288 writes/day, within free limit)
+    if (activeWorkers.size > 0) {
+        const registry = Object.fromEntries(activeWorkers);
+        await saveRegistry(env, registry);
+    }
 }
 
 // ============================================================================
