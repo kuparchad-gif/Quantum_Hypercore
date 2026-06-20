@@ -1,0 +1,16 @@
+name = "nexus-hypercore-001"
+main = "src/index.js"
+compatibility_date = "2024-12-18"
+compatibility_flags = ["nodejs_compat"]
+
+[triggers]
+crons = ["*/5 * * * *"]
+
+[vars]
+WORKER_ID = "nexus-hypercore-001"
+DOMAIN = "kuparchad.workers.dev"
+
+# kv_nexus_state (shared mesh state namespace, id=33be0158fc284aa78eae0511826aacca)
+[[kv_namespaces]]
+binding = "KV"
+id = "33be0158fc284aa78eae0511826aacca"
